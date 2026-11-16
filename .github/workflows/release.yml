@@ -1,0 +1,72 @@
+name: asr-release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза (например v0.1.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Собрать архивы
+        run: |
+          set -euo pipefail
+          rm -rf dist stage
+          mkdir -p dist
+
+          build() {
+            target="$1"; src="$2"; name="$3"
+            rm -rf stage; mkdir -p stage
+            cp "$src" "stage/$name"
+            chmod 755 "stage/$name"
+            cp model/model.bin model/vocab.txt model/vad.bin stage/
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+                -C stage -cf - "$name" model.bin vocab.txt vad.bin \
+              | gzip -n > "dist/asr_${target}.tar.gz"
+            sha256sum "dist/asr_${target}.tar.gz" | cut -d' ' -f1 \
+              > "dist/asr_${target}.sha256"
+          }
+
+          build linux_arm64 bin/asr_zesp_aarch64 asr_zesp
+
+          ls -l dist
+
+      - name: Проверить архивы
+        run: |
+          set -euo pipefail
+          for f in dist/*.tar.gz; do
+            echo "== $f"
+            tar -tzf "$f"
+            # бинарь должен быть исполняемым и непустым, модель — на месте
+            tar -xzf "$f" -C /tmp --one-top-level=check-$(basename "$f" .tar.gz)
+            d=/tmp/check-$(basename "$f" .tar.gz)
+            test -s "$d/model.bin"   && [ "$(stat -c%s "$d/model.bin")" -gt 5000000 ]
+            test -s "$d/vocab.txt"
+            test -s "$d/vad.bin"
+            test -s "$d"/asr_zesp*
+            head -c4 "$d"/asr_zesp* | od -An -tx1
+          done
+
+      - name: Опубликовать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --generate-notes \
+              --latest
+          fi
