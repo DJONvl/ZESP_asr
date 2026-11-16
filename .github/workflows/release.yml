@@ -32,8 +32,6 @@ jobs:
             tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
                 -C stage -cf - "$name" model.bin vocab.txt vad.bin \
               | gzip -n > "dist/asr_${target}.tar.gz"
-            sha256sum "dist/asr_${target}.tar.gz" | cut -d' ' -f1 \
-              > "dist/asr_${target}.sha256"
           }
 
           build linux_arm64 bin/asr_zesp_aarch64 asr_zesp
