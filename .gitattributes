@@ -1,2 +1,3 @@
 *.bin binary
 bin/* binary
+model/vocab.txt -text
