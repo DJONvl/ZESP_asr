@@ -17,8 +17,9 @@
 
 `asr_zesp` — один бинарь на четыре режима, ZESP использует `--tcp` (реплика
 Ogg/Opus → строка текста) и `--vad` (поток Ogg/Opus → `E`/`N`).
-Проект обучения и сборки — `C:\nnom\asr_zesp` (`runtime/build_runtime.ps1`,
-`export_runtime.py`, `export_vad.py`).
+Проект обучения и сборки — **`C:\ZESP_asr\train`** (`runtime/build_runtime.ps1`,
+`export_runtime.py`, `export_vad.py`). Как обучать модель — см.
+[TRAINING.md](TRAINING.md).
 
 ## Релизы
 
@@ -68,7 +69,7 @@ Workflow `asr-release` соберёт архивы, проверит их и о�
 
 ## Примечания
 
-- armv7 (`.2`, `.221`) пока не собран: в `C:\nnom\asr_zesp\runtime` нет
+- armv7 (`.2`, `.221`) пока не собран: в `C:\ZESP_asr\train\runtime` нет
   `asr_zesp_armv7l`. Когда появится — положить в `bin/` и добавить строку в
   workflow.
 - Модель обновляется редко; новый релиз нужен только когда меняются файлы.
