@@ -6,3 +6,7 @@ train/
 __pycache__/
 *.pyc
 migrate_paths.py
+
+# эксперименты: скрипты и README в git, чекпоинты и логи — нет
+exp/*/*.pt
+exp/*/logs/
