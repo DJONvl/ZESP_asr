@@ -28,6 +28,13 @@ from swenc import Subword
 
 CKPT = os.path.join(HERE, "model_subword.pt")
 
+PREP = {"в", "во", "у", "на", "с", "со", "к", "ко", "по", "из", "за", "от", "до",
+        "о", "об", "под", "над", "для", "без", "при", "про", "через", "около"}
+
+
+def has_prep(text):
+    return any(w in PREP for w in text.lower().split())
+
 
 def read_meta(path, limit=0):
     rows = []
@@ -56,18 +63,19 @@ class DS(Dataset):
             m = m.clone()
             m = spec_augment(m)
         y = torch.tensor(self.sw.encode(text), dtype=torch.long)
-        return m, y
+        return m, y, 1.0 if has_prep(text) else 0.0
 
 
 def collate(batch):
-    ms, ys = zip(*batch)
+    ms, ys, ps = zip(*batch)
     lens = torch.tensor([m.shape[0] for m in ms])
     ylens = torch.tensor([len(y) for y in ys])
     m = torch.zeros(len(ms), int(lens.max()), ms[0].shape[1])
     for i, x in enumerate(ms):
         m[i, :x.shape[0]] = x
     y = torch.cat(ys) if ys else torch.zeros(0, dtype=torch.long)
-    return m, lens, y, ylens
+    p = torch.tensor(ps, dtype=torch.float32)
+    return m, lens, y, ylens, p
 
 
 @torch.no_grad()
@@ -100,7 +108,12 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--tts-limit", type=int, default=0)
     ap.add_argument("--golos", type=int, default=0, help="сколько фраз Golos farfield добавить")
+    ap.add_argument("--aug", default="", help="meta с аугментированными живыми записями")
+    ap.add_argument("--prep-weight", type=float, default=1.0,
+                    help="вес фраз с предлогами в CTC-лоссе")
     ap.add_argument("--live-weight", type=float, default=1.0, help="перекос живых фраз")
+    ap.add_argument("--init", default="", help="продолжить с чекпоинта")
+    ap.add_argument("--out", default="", help="куда сохранять (по умолчанию model_subword.pt)")
     ap.add_argument("--amp", action="store_true")
     args = ap.parse_args()
 
@@ -129,19 +142,31 @@ def main():
                  if os.path.exists(paths.mel_path(i[0]))]
         train_items += golos
         print("golos: %d фраз" % len(golos), flush=True)
+    if args.aug:
+        aug = [i for i in read_meta(args.aug)
+               if os.path.exists(paths.mel_path(i[0]))]
+        train_items += aug
+        print("aug: %d фраз" % len(aug), flush=True)
     train_items = [(i, t) for i, t in train_items if sw.encode(t)]
     print("train %d, val .128 %d, val .151 %d"
           % (len(train_items), len(live_val), len(nov_val)), flush=True)
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.init and not os.path.isabs(args.init):
+        args.init = os.path.join(HERE, args.init)
     model = CTCModel(len(sw)).to(dev)
+    if args.init:
+        ck = torch.load(args.init, map_location="cpu", weights_only=False)
+        model.load_state_dict(ck["model"])
+        print("продолжение от %s" % args.init, flush=True)
     print("params %.2fM" % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
     dl = DataLoader(DS(train_items, sw), batch_size=args.batch, shuffle=True,
                     collate_fn=collate, num_workers=0, drop_last=True)
     if args.live_weight != 1.0:
         from torch.utils.data import WeightedRandomSampler
-        w = [args.live_weight if i[0].startswith("l") else 1.0 for i in train_items]
+        w = [args.live_weight if (i[0].startswith("l") or i[0].startswith("w")) else 1.0
+             for i in train_items]
         n_live = sum(1 for i in train_items if i[0].startswith("l"))
         sampler = WeightedRandomSampler(w, num_samples=len(w), replacement=True)
         dl = DataLoader(DS(train_items, sw), batch_size=args.batch, sampler=sampler,
@@ -150,21 +175,33 @@ def main():
               % (args.live_weight, n_live, len(train_items)), flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
-    ctc = nn.CTCLoss(blank=0, zero_infinity=True)
+    ctc = nn.CTCLoss(blank=0, zero_infinity=True, reduction="none")
     amp = args.amp and dev == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
 
     best = 9e9
+    if args.init:
+        c0 = evaluate(model, live_val, sw, dev, amp)
+        n0 = evaluate(model, nov_val, sw, dev, amp)
+        best = c0 + n0
+        print("качество до продолжения: .128 %.4f  .151 %.4f (best %.4f)"
+              % (c0, n0, best), flush=True)
+    out_path = args.out if os.path.isabs(args.out) else os.path.join(HERE, args.out or "model_subword.pt")
     for ep in range(1, args.epochs + 1):
         model.train()
         tot, n = 0.0, 0
         t0 = time.time()
-        for m, lens, y, ylens in dl:
+        for m, lens, y, ylens, prep in dl:
             m, lens, y, ylens = m.to(dev), lens.to(dev), y.to(dev), ylens.to(dev)
             with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
                 logits, _ = model(m, lens)
             out_lens = (lens + 3) // 4
-            loss = ctc(logits.float().transpose(0, 1), y, out_lens, ylens)
+            raw = ctc(logits.float().transpose(0, 1), y, out_lens, ylens)
+            if args.prep_weight != 1.0:
+                w = (1.0 + (args.prep_weight - 1.0) * prep.to(dev))
+                loss = (raw * w).sum() / w.sum()
+            else:
+                loss = raw.mean()
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -181,8 +218,8 @@ def main():
         score = c151 + c128
         if score < best:
             best = score
-            torch.save({"model": model.state_dict(), "tokens": sw.tokens}, CKPT)
-            print("  saved -> %s" % CKPT, flush=True)
+            torch.save({"model": model.state_dict(), "tokens": sw.tokens}, out_path)
+            print("  saved -> %s" % out_path, flush=True)
 
 
 if __name__ == "__main__":

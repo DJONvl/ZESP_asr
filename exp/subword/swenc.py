@@ -42,5 +42,10 @@ class Subword:
         return ids
 
     def decode(self, ids):
-        out = "".join(self.inv.get(i, "") for i in ids if i != 0)
-        return out.replace("\u2581", " ").strip()
+        """CTC greedy: схлопываем повторы и убираем blank (id 0)."""
+        out, prev = [], -1
+        for i in ids:
+            if i != prev and i != 0:
+                out.append(self.inv.get(i, ""))
+            prev = i
+        return "".join(out).replace("\u2581", " ").strip()
