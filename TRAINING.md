@@ -192,13 +192,19 @@ py train_ctc.py --epochs 30 --batch 16 --lr 3e-4 --amp
 ### 4.4 VAD
 
 ```powershell
-py vad_data.py --n-train 4000 --n-val 400   # метки по энергии, whisper не нужен
-py train_vad.py --epochs 30                  # AUC ~0.899
+py vad_data.py --n-train 5000 --n-val 500   # метки по энергии, whisper не нужен
+py train_vad.py --epochs 30                  # AUC ~0.898
 py export_vad.py                             # -> runtime/vad.bin
 ```
 
 Вход VAD: 80 log-mel (per-utterance) + **log-RMS кадра** 81-м каналом, поэтому
 он чувствителен к уровню входа сильнее, чем ASR.
+
+⚠ Новые записи нужно **добавлять в `vad_data.py`** (список meta в цикле
+`for meta in (...)`), иначе VAD их не увидит и будет пропускать речь:
+на записях .151 пропуски были 4.0 %, после добавления `live_nov23_v2.csv` и
+переобучения — 1.3 % (на .128 — 0.6 %). Дообучение занимает ~10 минут.
+
 
 ---
 
